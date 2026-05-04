@@ -2,20 +2,53 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // Only accept WebSocket on specific path
+    // 🌐 Browser test (open root in browser)
+    if (url.pathname === "/") {
+      return new Response(
+        JSON.stringify({
+          status: "ok",
+          message: "Worker is alive",
+          websocket_path: "/vless",
+          time: new Date().toISOString(),
+          note: "Use a VLESS client to connect via WebSocket"
+        }, null, 2),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    }
+
+    // 🔍 Optional debug endpoint
+    if (url.pathname === "/debug") {
+      return new Response(
+        JSON.stringify({
+          headers: Object.fromEntries(request.headers),
+          cf: request.cf || null,
+        }, null, 2),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    }
+
+    // 🚫 Wrong path
     if (url.pathname !== "/vless") {
       return new Response("Not Found", { status: 404 });
     }
 
+    // ❌ Not a WebSocket request
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket", { status: 400 });
     }
 
+    // 🔌 WebSocket handling
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
 
-    handleVLESS(server);
+    handleConnection(server);
 
     return new Response(null, {
       status: 101,
@@ -24,65 +57,115 @@ export default {
   },
 };
 
-const UUID = "792401002";
+const UUID = "IxUgbfuIKqyv1EZlIyFcdGfDxHWrewwv";
 
-async function handleVLESS(ws) {
+async function handleConnection(ws) {
   ws.accept();
 
-  ws.addEventListener("message", async (event) => {
-    const data = new Uint8Array(event.data);
+  // 👇 Let client know WS is established
+  ws.send("connected");
 
-    // ---- Minimal VLESS parsing ----
-    const version = data[0];
-    const uuid = [...data.slice(1, 17)]
-      .map((b) => b.toString(16).padStart(2, "0"))
+  let remoteWriter = null;
+  let remoteReader = null;
+
+  ws.addEventListener("message", async (event) => {
+    const chunk = new Uint8Array(event.data);
+
+    if (!remoteWriter) {
+      const parsed = parseVLESS(chunk);
+
+      if (!parsed || parsed.uuid !== UUID) {
+        ws.send("invalid uuid");
+        ws.close();
+        return;
+      }
+
+      const { address, port, rawData } = parsed;
+
+      ws.send(`connecting to ${address}:${port}`);
+
+      try {
+        const tcp = await connectTCP(address, port);
+
+        ws.send("tcp connected");
+
+        remoteWriter = tcp.writable.getWriter();
+        remoteReader = tcp.readable.getReader();
+
+        if (rawData.byteLength > 0) {
+          await remoteWriter.write(rawData);
+        }
+
+        pipeRemoteToWS(remoteReader, ws);
+
+      } catch (e) {
+        ws.send("connection failed");
+        ws.close();
+      }
+
+    } else {
+      try {
+        await remoteWriter.write(chunk);
+      } catch {
+        ws.close();
+      }
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    try { remoteWriter?.close(); } catch {}
+    try { remoteReader?.cancel(); } catch {}
+  });
+}
+
+async function pipeRemoteToWS(reader, ws) {
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      ws.send(value);
+    }
+  } catch {}
+  ws.close();
+}
+
+function parseVLESS(buffer) {
+  try {
+    const uuid = [...buffer.slice(1, 17)]
+      .map(b => b.toString(16).padStart(2, "0"))
       .join("");
 
-    if (!matchUUID(uuid, UUID)) {
-      ws.close();
-      return;
-    }
+    const cmd = buffer[17];
+    if (cmd !== 1) return null;
 
-    const cmd = data[17]; // 1 = TCP
-    if (cmd !== 1) {
-      ws.close();
-      return;
-    }
-
-    const addrType = data[18];
+    const addrType = buffer[18];
     let addr = "";
     let portIndex;
 
     if (addrType === 1) {
-      // IPv4
-      addr = data.slice(19, 23).join(".");
+      addr = buffer.slice(19, 23).join(".");
       portIndex = 23;
     } else if (addrType === 2) {
-      // domain
-      const len = data[19];
-      addr = new TextDecoder().decode(data.slice(20, 20 + len));
+      const len = buffer[19];
+      addr = new TextDecoder().decode(buffer.slice(20, 20 + len));
       portIndex = 20 + len;
     } else {
-      ws.close();
-      return;
+      return null;
     }
 
-    const port = (data[portIndex] << 8) + data[portIndex + 1];
+    const port = (buffer[portIndex] << 8) + buffer[portIndex + 1];
+    const rawData = buffer.slice(portIndex + 2);
 
-    // ---- Forward using fetch (HTTP only) ----
-    try {
-      const response = await fetch(`https://${addr}:${port}`, {
-        method: "GET",
-      });
+    return { uuid, address: addr, port, rawData };
 
-      const body = await response.arrayBuffer();
-      ws.send(body);
-    } catch (e) {
-      ws.close();
-    }
-  });
+  } catch {
+    return null;
+  }
 }
 
-function matchUUID(a, b) {
-  return a.replace(/-/g, "").toLowerCase() === b.replace(/-/g, "").toLowerCase();
+async function connectTCP(host, port) {
+  return await globalThis.connect({
+    hostname: host,
+    port: port,
+  });
 }
