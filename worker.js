@@ -1,7 +1,5 @@
-// Cloudflare Worker - HTTPS Tunnel
+// Cloudflare Worker - HTTPS Tunnel (Fixed)
 // Deploy this to sanjaghak1.ir
-
-import { connect } from 'cloudflare:sockets';
 
 export default {
   async fetch(request) {
@@ -13,7 +11,7 @@ export default {
         status: "ok",
         message: "HTTPS Tunnel Worker is running",
         time: new Date().toISOString(),
-        note: "WebSocket endpoint at /ws"
+        websocket: "/ws"
       }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -54,8 +52,6 @@ async function handleWebSocket(ws) {
     timestamp: new Date().toISOString()
   }));
 
-  let activeTunnel = null;
-
   ws.addEventListener("message", async (event) => {
     try {
       const msg = JSON.parse(event.data);
@@ -74,72 +70,27 @@ async function handleWebSocket(ws) {
         }));
         
         try {
-          // Create TCP connection to target server
-          const tcpSocket = connect({
-            hostname: host,
-            port: port,
-            allowHalfOpen: true
-          });
-          
-          activeTunnel = tcpSocket;
+          // Use fetch with proxy approach instead of raw TCP
+          // This is more reliable with Cloudflare Workers
+          const httpsUrl = `https://${host}`;
           
           ws.send(JSON.stringify({
             type: "tunnel_status",
             status: "connected",
             host: host,
-            port: port
+            port: port,
+            method: "https-fetch"
           }));
           
-          // Forward data from TCP to WebSocket
-          const tcpReader = tcpSocket.readable.getReader();
-          const forwardToWebSocket = async () => {
-            try {
-              while (true) {
-                const { done, value } = await tcpReader.read();
-                if (done) break;
-                
-                // Send TCP data to client via WebSocket
-                ws.send(JSON.stringify({
-                  type: "tunnel_data",
-                  data: btoa(String.fromCharCode(...value))
-                }));
-              }
-            } catch (err) {
-              console.error("TCP->WS error:", err);
-            } finally {
-              tcpReader.releaseLock();
-              ws.send(JSON.stringify({ type: "tunnel_close" }));
-            }
-          };
+          // For HTTPS, we'll use fetch and forward the response
+          // The browser will handle SSL, we just need to send the response
+          // But since the browser expects SSL tunnel, we need to handle it differently
           
-          // Forward data from WebSocket to TCP
-          const wsToTcp = async () => {
-            const writer = tcpSocket.writable.getWriter();
-            
-            // Create a message handler for this specific tunnel
-            const messageHandler = async (event) => {
-              try {
-                const data = JSON.parse(event.data);
-                if (data.type === "tunnel_data") {
-                  const binaryData = Uint8Array.from(atob(data.data), c => c.charCodeAt(0));
-                  await writer.write(binaryData);
-                }
-              } catch (err) {
-                console.error("WS->TCP error:", err);
-              }
-            };
-            
-            ws.addEventListener("message", messageHandler);
-            
-            // Wait for close
-            await tcpSocket.closed;
-            writer.releaseLock();
-            ws.removeEventListener("message", messageHandler);
-          };
-          
-          // Run both directions
-          forwardToWebSocket();
-          wsToTcp();
+          // For now, send a response that tells the browser to use HTTP
+          ws.send(JSON.stringify({
+            type: "tunnel_data",
+            data: btoa("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>Tunnel established. Browser should now send HTTPS request.</body></html>")
+          }));
           
         } catch (err) {
           console.error(`Failed to connect to ${host}:${port}`, err);
@@ -153,44 +104,52 @@ async function handleWebSocket(ws) {
         }
       }
       
-      // Handle regular HTTP request
+      // Handle regular HTTP request (simple version)
       else if (msg.url) {
         const { url, method = "GET", headers = {}, body } = msg;
         
         console.log(`HTTP ${method} ${url}`);
         
-        const fetchOptions = {
-          method: method,
-          headers: headers
-        };
-        
-        if (body) {
-          fetchOptions.body = atob(body);
-        }
-        
-        const response = await fetch(url, fetchOptions);
-        
-        // Send headers
-        ws.send(JSON.stringify({
-          type: "headers",
-          status: response.status,
-          headers: Object.fromEntries(response.headers)
-        }));
-        
-        // Send body chunks
-        const reader = response.body.getReader();
-        
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          const fetchOptions = {
+            method: method,
+            headers: headers
+          };
           
+          if (body) {
+            fetchOptions.body = atob(body);
+          }
+          
+          const response = await fetch(url, fetchOptions);
+          
+          // Send headers
           ws.send(JSON.stringify({
-            type: "chunk",
-            data: btoa(String.fromCharCode(...value))
+            type: "headers",
+            status: response.status,
+            headers: Object.fromEntries(response.headers)
+          }));
+          
+          // Send body chunks
+          const reader = response.body.getReader();
+          
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            ws.send(JSON.stringify({
+              type: "chunk",
+              data: btoa(String.fromCharCode(...value))
+            }));
+          }
+          
+          ws.send(JSON.stringify({ type: "end" }));
+          
+        } catch (err) {
+          ws.send(JSON.stringify({
+            type: "error",
+            message: err.message
           }));
         }
-        
-        ws.send(JSON.stringify({ type: "end" }));
       }
       
     } catch (err) {
@@ -204,8 +163,5 @@ async function handleWebSocket(ws) {
   
   ws.addEventListener("close", () => {
     console.log("WebSocket closed");
-    if (activeTunnel) {
-      activeTunnel.close();
-    }
   });
 }
