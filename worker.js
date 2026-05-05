@@ -1,6 +1,6 @@
 // Developed by Surfboardv2ray
 // https://github.com/Surfboardv2ray/v2ray-refiner
-// Version 1.2.1 - FIXED
+// Version 1.2.1 - FIXED (Error 1101 resolved)
 
 export default {
   async fetch(request) {
@@ -10,9 +10,20 @@ export default {
 
 async function handleRequest(request) {
   const headers = new Headers();
-  headers.set('Access-Control-Allow-Origin', '*'); 
+  headers.set('Access-Control-Allow-Origin', '*');
   headers.set('Access-Control-Allow-Methods', 'GET, POST');
   headers.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  // Handle WebSocket upgrade requests properly
+  if (request.headers.get('Upgrade') === 'websocket') {
+    try {
+      // Pass through the WebSocket connection without modification
+      // The key is to not modify the request body or headers for WebSocket
+      return fetch(request);
+    } catch (err) {
+      return new Response('WebSocket upgrade failed: ' + err.message, { status: 500 });
+    }
+  }
 
   if (request.method === 'OPTIONS') {
     return new Response(null, { headers });
