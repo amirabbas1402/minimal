@@ -1,6 +1,6 @@
 // Developed by Surfboardv2ray
 // https://github.com/Surfboardv2ray/v2ray-refiner
-// Version 1.2.1
+// Version 1.2.1 - FIXED
 
 export default {
   async fetch(request) {
@@ -14,14 +14,8 @@ async function handleRequest(request) {
   headers.set('Access-Control-Allow-Methods', 'GET, POST');
   headers.set('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (request.headers.get('Upgrade') === 'websocket') {
-    return handleWebSocket(request);
-  }
-
   if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      headers,
-    });
+    return new Response(null, { headers });
   }
 
   if (request.method === 'GET') {
@@ -48,13 +42,6 @@ async function handleRequest(request) {
   }
 
   return new Response('Method not allowed', { status: 405 });
-}
-
-async function handleWebSocket(request) {
-  const url = new URL(request.url);
-  const newUrl = new URL("https://" + url.pathname.replace(/^\/|\/$/g, ""));
-
-  return fetch(new Request(newUrl, request));
 }
 
 function renderHTML() {
@@ -188,7 +175,7 @@ function renderHTML() {
     <div class="container">
       <h2>TLS Config Refiner</h2>
       <label for="config">Enter your proxy config (Vmess, Vless, Trojan):</label>
-      <textarea id="config" placeholder="vmess://..."></textarea>
+      <textarea id="config" placeholder="vless://..."></textarea>
       
       <label for="clean-ip">Clean IP Address (Please set your own):</label>
       <input type="text" id="clean-ip" value="162.159.195.189">
@@ -250,30 +237,27 @@ async function refineConfig(config, cleanIp, workerHost) {
 }
 
 function refineVmess(config, cleanIp, workerHost, allowedPorts) {
-  const base64Data = config.slice(8); // Remove 'vmess://'
-  const decodedString = atob(base64Data); // Decode base64 string
-  const decoded = JSON.parse(decodeURIComponent(escape(decodedString))); // Handle non-Latin1 characters
+  const base64Data = config.slice(8);
+  const decodedString = atob(base64Data);
+  const decoded = JSON.parse(decodeURIComponent(escape(decodedString)));
 
   if (decoded.net !== 'ws') throw new Error('Network must be WS');
   if (decoded.tls !== 'tls') throw new Error('Security must be TLS');
   
-  // Check if the input port is allowed
   if (!allowedPorts.includes(String(decoded.port))) {
     throw new Error('Config must use a Cloudflare TLS Port (443, 8443, 2053, 2083, 2087, or 2096) to proceed');
   }
 
-  // Preserve the original `host` and `sni` values before overwriting
-  const originalHost = decoded.host || ''; // Original host
-  const originalSni = decoded.sni || decoded.host || ''; // Original SNI or fallback to host
+  const originalHost = decoded.host || '';
+  const originalSni = decoded.sni || decoded.host || '';
   
-  // Set the port to 443 regardless of input config
   decoded.port = 443;
-  decoded.add = cleanIp; // Set clean IP for "address"
-  decoded.host = workerHost; // New worker host
-  decoded.sni = workerHost; // New worker SNI
+  decoded.add = cleanIp;
+  decoded.host = workerHost;
+  decoded.sni = workerHost;
 
-  const originalPath = decoded.path || ''; // Original path
-  decoded.path = `/${originalSni}${originalPath}`; // Concatenated path with original SNI
+  const originalPath = decoded.path || '';
+  decoded.path = `/${originalSni}${originalPath}`;
 
   const newConfig = 'vmess://' + btoa(unescape(encodeURIComponent(JSON.stringify(decoded))));
   return newConfig;
@@ -284,19 +268,17 @@ function refineVless(config, cleanIp, workerHost, allowedPorts) {
   if (url.searchParams.get('type') !== 'ws') throw new Error('Network must be WS');
   if (url.searchParams.get('security') !== 'tls') throw new Error('Security must be TLS');
 
-  // Check if the input port is allowed
   if (!allowedPorts.includes(url.port)) {
     throw new Error('Config must use a Cloudflare TLS Port (443, 8443, 2053, 2083, 2087, or 2096) to proceed');
   }
 
-  // Set the port to 443 regardless of input config
   url.port = 443;
-  url.host = cleanIp; // Set clean IP for "address"
-  const originalHost = url.searchParams.get('host') || ''; // Original host
-  const originalPath = url.searchParams.get('path') || ''; // Original path
+  url.host = cleanIp;
+  const originalHost = url.searchParams.get('host') || '';
+  const originalPath = url.searchParams.get('path') || '';
   url.searchParams.set('host', workerHost);
   url.searchParams.set('sni', workerHost);
-  url.searchParams.set('path', `/${originalHost}${originalPath}`); // Concatenated path
+  url.searchParams.set('path', `/${originalHost}${originalPath}`);
 
   return url.toString();
 }
@@ -306,19 +288,17 @@ function refineTrojan(config, cleanIp, workerHost, allowedPorts) {
   if (url.searchParams.get('type') !== 'ws') throw new Error('Network must be WS');
   if (url.searchParams.get('security') !== 'tls') throw new Error('Security must be TLS');
 
-  // Check if the input port is allowed
   if (!allowedPorts.includes(url.port)) {
     throw new Error('Config must use a Cloudflare TLS Port (443, 8443, 2053, 2083, 2087, or 2096) to proceed');
   }
 
-  // Set the port to 443 regardless of input config
   url.port = 443;
-  url.host = cleanIp; // Set clean IP for "address"
-  const originalHost = url.searchParams.get('host') || ''; // Original host
-  const originalPath = url.searchParams.get('path') || ''; // Original path
+  url.host = cleanIp;
+  const originalHost = url.searchParams.get('host') || '';
+  const originalPath = url.searchParams.get('path') || '';
   url.searchParams.set('host', workerHost);
   url.searchParams.set('sni', workerHost);
-  url.searchParams.set('path', `/${originalHost}${originalPath}`); // Concatenated path
+  url.searchParams.set('path', `/${originalHost}${originalPath}`);
 
   return url.toString();
 }
